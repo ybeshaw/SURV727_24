@@ -9,7 +9,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-# Load the Necessary Packages #
+# Load the Necessary Packages
 ```{r}
 library(censusapi)
 library(tidyverse)
@@ -17,7 +17,7 @@ library(magrittr)
 library(factoextra)
 ```
 
-# Exploring ACS Data #
+# Exploring ACS Data
 ```{r}
 cs_key <- "4dfcefb5de015bd6b5ce2762c614a779762b6c0b"
 
@@ -50,7 +50,7 @@ tolower() might be useful. Call the joined data acs_map.
 acs_il_c$NAME <- gsub(" County, Illinois", "", acs_il_c$NAME) #remove extra words
 acs_il_c$NAME <- tolower(acs_il_c$NAME) #lowercase
 
-il_map$subregion <- tolower(il_map$subregion) #make sure this is lowercase as well
+il_map$subregion <- tolower(il_map$subregion) #make sure this is lc as well
 
 acs_map <- left_join(il_map, acs_il_c, by = c("subregion" = "NAME")) #join
 
@@ -63,7 +63,7 @@ Plot a map og Illinois with Counties colored by per capita income
 ggplot(acs_map) +
   geom_polygon(aes(x = long, y = lat, group = group, fill = income))
 ```
-# Hierarchial Clustering #
+# Hierarchial Clustering
 We want to find clusters of counties that are similar in their population, 
 average household income and per capita income. First, clean the data so that
 you have the appropriate variables to use for clustering. Next, create the 
@@ -77,16 +77,18 @@ counties, e.g. using the ward method.
 # per capita income (income)
 
 #clean the data so that you have the appropriate variables to use for clustering
-acs_heir <- acs_map %>%
-  select(pop, hh_income, income) %>%
-  drop_na() %>%
-  mutate_all(scale)
-  
+acs_heir <- acs_il_c %>%
+  select(pop, hh_income, income)%>%
+  mutate_all(scale)%>%
+  drop_na()%>%
+  rename(pop = pop,
+         hh_income = hh_income,
+         income = income)
 
 #create the distance matrix of the cleaned data
 distance_matrix <- dist(acs_heir)
-distance_matrix
 ```
+
 Plot the dendrogram to find a reasonable number of clusters. Draw boxes around 
 the clusters of your cluster solution. 
 ```{r}
@@ -101,11 +103,143 @@ rect.hclust(acs_ward,
 Visualize the county clusters on a map. For this task, create a new acs_map 
 object that now also includes cluster membership as a new column. This column 
 should be called cluster.
-```{r}
-#create a new acs_map object that now also includes cluster membership as a new column
-cluster_membership <- cutree(acs_ward, 10)
 
-acs_map$cluster <- cluster_membership
+```{r}
+#create a new acs_map object that now also includes cluster membership 
+#as a new column
+cluster_membership <- cutree(acs_ward, 10)
+acs_il_c$cluster <- cluster_membership
+acs_map <- left_join(il_map, acs_il_c, by = c("subregion" = "NAME"))
+
+#acs_map$cluster #check
+
+ggplot(acs_map) +
+  geom_polygon(aes(x = long, y = lat, group = group, fill = factor(cluster)))
 ```
+
+# Census Tracts
+For the next section we need ACS data on a census tract level. We use the same
+variables as before.
+```{r}
+acs_il_t <- getCensus(name = "acs/acs5", vintage = 2016, 
+                      vars = c("NAME", 
+                               "B01003_001E", 
+                               "B19013_001E", 
+                               "B19301_001E"), 
+                      region = "tract:*", 
+                      regionin = "state:17", key = cs_key) %>% 
+  mutate_all(funs(ifelse(.==-666666666, NA, .))) %>%
+  rename(pop = B01003_001E,
+         hh_income = B19013_001E,
+         income = B19301_001E)
+
+head(acs_il_t)
+```
+
+
+# k-Means
+
+As before, clean our data for clustering census tracts based on population, 
+average household income and per capita income
+```{r}
+acs_new <- acs_il_t %>%
+  select(pop, hh_income, income) %>%
+  mutate_all(scale) %>%
+  drop_na()
+```
+
+Since we want to use K Means in this section, we start by determining the 
+optimal number of K that results in Clusters with low within but high between 
+variation. Plot within cluster sums of squares for a range of K (e.g. up to 20).
+```{r}
+fviz_nbclust(acs_new, #data set we want to use
+             kmeans, #cluster method
+             method = "wss", #method used for est the optimal number of clusters
+             k.max = 20) #5 seems to be the optimal number of clusters
+```
+
+Run kmeans() for the optimal number of clusters based on the plot above.
+```{r}
+km <- kmeans(acs_new, 5, nstart = 20)
+```
+
+Find the mean population, household income and per capita income grouped by 
+clusters.
+```{r}
+acs_new$cluster <- km$cluster
+
+means <- acs_new %>%
+  group_by(cluster) %>%
+  summarise(
+    mean_pop = mean(pop, na.rm = TRUE),
+    mean_hh_income = mean(hh_income, na.rm = TRUE),
+    mean_income = mean(income, na.rm = TRUE)
+  )
+means
+```
+
+In addition, display the most frequent county that can be observed 
+within each cluster.
+```{r}
+acs_il_t_clean <- acs_il_t %>%
+  filter(complete.cases(pop, hh_income, income)) #make sure that the dim match
+acs_il_t_clean$cluster <- km$cluster #add km$cluser to the original and clean df
+
+#find most freq.county
+frequent_county <- acs_il_t_clean %>%
+  group_by(cluster) %>%
+  summarise(
+    most_frequent_county = names(sort(table(NAME), decreasing = TRUE))[1]
+  )
+
+frequent_county
+```
+
+As you might have seen earlier, it’s not always clear which number of clusters
+is the optimal choice. To automate K Means clustering, program a function based
+on kmeans() that takes K as an argument. You can fix the other arguments, e.g. 
+such that a specific dataset is always used when calling the function.
+```{r}
+automatic_kmeans <- function (df, k){
+  cluster <- kmeans(df, k, nstart = 20)
+  return(cluster$cluster)
+}
+
+#automatic_kmeans(acs_new,6 )
+```
+
+
+We want to utilize this function to iterate over multiple Ks
+(e.g., K = 2, ..., 10) and – each time– add the resulting cluster membership as
+a new variable to our (cleaned) original data frame (acs_il_t). There are 
+multiple solutions for this task, e.g. think about the apply family or
+for loops.
+```{r}
+
+automatic_kmeans <- function (df, k){
+  if (k >= nrow(df)) { #3109 or higher in the case of acs_new
+    print("error: more cluster centers than distinct data points")
+    return(NULL) #set as NULL to avoid errors when this occurs 
+  } 
+  cluster <- kmeans(df, k, nstart = 20)
+  return(cluster$cluster)
+}
+
+
+for (k in 2:10) {
+  cluster_loop <- automatic_kmeans(acs_new, k)
+  if (!is.null(cluster_loop)) { #if not NULL (bigger than data points), proceed
+    acs_il_t_clean[[paste0("cluster_", k)]] <- cluster_loop
+  }
+}
+```
+
+
+Finally, display the first rows of the updated data set (with multiple
+cluster columns)
+```{r}
+head(acs_il_t_clean)
+```
+
 
 
